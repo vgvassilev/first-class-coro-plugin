@@ -1,0 +1,153 @@
+sudo: true
+
+# Specifying none will let us define CXX and CC in the way we want.
+# See more: https://github.com/travis-ci/travis-ci/issues/6083
+language: none
+
+addons: &addons
+  apt:
+    packages: &common_deps
+      - cmake
+      - binutils-gold
+      - llvm-5.0-dev
+      - libclang-5.0-dev
+      - clang-5.0
+    sources: &sources
+      - ubuntu-toolchain-r-test
+      - llvm-toolchain-trusty-4.0
+      - llvm-toolchain-trusty-5.0
+
+cache:
+  pip: true
+  apt: true
+  ccache: true
+  directories:
+    - $HOME/.ccache
+
+env:
+  global:
+    - USE_CCACHE=1
+    - CCACHE_COMPRESS=1
+    - CCACHE_MAXSIZE=500M
+    - CCACHE_CPP2=1
+
+
+matrix:
+  # Abort all builds on a single failing matrix entry.
+  fast_finish: true
+
+  exclude:
+    # Note: Workaround travis-ci/travis-ci#4681
+    # Exclude default job which lacks our included environment variables.
+    - os: osx
+    - os: linux
+
+  include:
+    # OSX Clang and XCode 8.3
+    - os: osx
+      env: CXX=clang++ CC=clang BUILD_TYPE=Release
+      osx_image: xcode8.3
+      compiler: clang
+
+    # GCC 7
+    - env: CXX=g++-7 CC=gcc BUILD_TYPE=Debug
+      compiler: gcc
+      addons:
+        apt:
+          sources: *sources
+          packages: [*common_deps, 'g++-7', 'g++-7-multilib', 'libc6-dbg']
+    - env: CXX=g++-7 CC=gcc BUILD_TYPE=Release
+      compiler: gcc
+      addons:
+        apt:
+          sources: *sources
+          packages: [*common_deps, 'g++-7', 'g++-7-multilib', 'libc6-dbg']
+
+    # Clang 5
+    - env: CXX=clang++-5.0 CC=clang-5.0 BUILD_TYPE=Debug
+      compiler: clang
+      addons:
+        apt:
+          sources: *sources
+          packages: [*common_deps, 'clang-5.0', 'g++-multilib', 'libc6-dbg']
+    - env: CXX=clang++-5.0 CC=clang-5.0 BUILD_TYPE=Release
+      compiler: clang
+      addons:
+        apt:
+          sources: *sources
+          packages: [*common_deps, 'clang-5.0', 'g++-multilib', 'libc6-dbg']
+
+before_install:
+  - export
+
+install:
+  - |
+    export TRAVIS_PATH_TO_LLVM_BUILD=/usr/lib/llvm-5.0/
+    if [ $TRAVIS_OS_NAME == 'osx' ]; then
+      brew install ccache python coreutils
+      # Update openssl on osx because the current one is deprecated by python.
+      curl https://bootstrap.pypa.io/get-pip.py | sudo python
+      PATH="/usr/local/opt/ccache/libexec:$PATH"
+      # Install clang-5.0 to run the plugin with.
+      brew install llvm@5
+      TRAVIS_PATH_TO_LLVM_BUILD=/usr/local/opt/llvm@5/
+    fi
+    # Add -H to silence 'The directory '/Users/travis/.../pip/http' or its parent
+    # directory is not owned by the current user and the cache has been disabled.
+    sudo -H pip install lit # LLVM lit is not part of the llvm releases...
+
+before_script:
+  # travis untars clang-5.0 in /usr/local/clang-5.0.0/ which confuses the build.
+  - sudo rm -fr /usr/local/clang*
+  - cmake --version
+  - $CC --version
+  - $CXX --version
+  - |
+    if [ $TRAVIS_OS_NAME != 'osx' ]; then
+      # LLVM utils such as FileCheck and not are not part of the llvm release on unix.
+      cd tools && for tool in FileCheck not; do
+        svn export \
+          http://llvm.org/svn/llvm-project/llvm/branches/release_50/utils/${tool} ${tool} ;
+          echo "add_subdirectory(\"${tool}\")" >> CMakeLists.txt
+      done
+      cd ../
+    fi
+  - mkdir obj && cd obj
+  - cmake -DFCCT_PATH_TO_LLVM_BUILD="$TRAVIS_PATH_TO_LLVM_BUILD" \
+          -DCMAKE_BUILD_TYPE=$BUILD_TYPE $TRAVIS_BUILD_DIR
+script:
+  - |
+    # lit's substitution mechanism will use llvm_obj_root to resolve FileCheck.
+    # This expands FileCheck to the location of installed llvm.
+    # On OSX we are fine because FileCheck is part of the brew formula.
+    if [ $TRAVIS_OS_NAME != 'osx' ]; then
+      cmake --build . --target FileCheck -- -j4
+      sudo ln -s `pwd`/bin/FileCheck $TRAVIS_PATH_TO_LLVM_BUILD/bin/FileCheck
+    fi
+  - cmake --build . --target check-fcct -- -j4
+
+branches:
+  only:
+    - master
+    - coverity_scan
+
+notifications:
+  recipients:
+    - v.g.vassilev@gmail.com
+
+  email:
+    on_success: change
+    on_failure: always
+  #irc:
+  #channels:
+    #- "chat.freenode.net#rubinius"
+  template:
+    - "%{repository}/%{branch} (%{commit} - %{author}): %{message}"
+
+after_failure:
+  - export
+  - dpkg-query -L libclang-5.0-dev
+  - dpkg-query -L clang-5.0
+  - dpkg-query -L llvm-5.0-dev
+  - find /usr/lib/llvm-5.0/
+  - cat /home/travis/build/vgvassilev/first-class-coro-transform/obj/CMakeFiles/*.log
